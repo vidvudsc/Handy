@@ -31,7 +31,7 @@ do {
     let parent = getppid()
     let parentWatch = DispatchSource.makeTimerSource(queue: .global())
     parentWatch.schedule(deadline: .now() + .milliseconds(500), repeating: .milliseconds(500))
-    parentWatch.setEventHandler { if getppid() != parent { exit(0) } }
+    parentWatch.setEventHandler { @Sendable in if getppid() != parent { exit(0) } }
     parentWatch.resume()
     defer { parentWatch.cancel() }
     var options = Transcriber.Options()
