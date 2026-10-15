@@ -84,6 +84,16 @@ impl AudioVisualiser {
     }
 
     pub fn feed(&mut self, samples: &[f32]) -> Option<Vec<f32>> {
+        self.feed_with_scale(samples, true)
+    }
+
+    /// Return raw FFT magnitudes for Handy Beta's original four-band meter.
+    /// That meter measures overall loudness separately from the audio samples.
+    pub fn feed_raw(&mut self, samples: &[f32]) -> Option<Vec<f32>> {
+        self.feed_with_scale(samples, false)
+    }
+
+    fn feed_with_scale(&mut self, samples: &[f32], normalize: bool) -> Option<Vec<f32>> {
         // Add new samples to buffer
         self.buffer.extend_from_slice(samples);
 
@@ -124,6 +134,11 @@ impl AudioVisualiser {
 
             let avg_power = power_sum / (end_bin - start_bin) as f32;
 
+            if !normalize {
+                buckets[bucket_idx] = avg_power.sqrt() / self.window_size as f32;
+                continue;
+            }
+
             // Convert to dB with proper scaling
             let db = if avg_power > 1e-12 {
                 20.0 * (avg_power.sqrt() / self.window_size as f32).log10()
@@ -144,8 +159,10 @@ impl AudioVisualiser {
         }
 
         // Apply light smoothing to reduce jitter
-        for i in 1..buckets.len() - 1 {
-            buckets[i] = buckets[i] * 0.7 + buckets[i - 1] * 0.15 + buckets[i + 1] * 0.15;
+        if normalize {
+            for i in 1..buckets.len() - 1 {
+                buckets[i] = buckets[i] * 0.7 + buckets[i - 1] * 0.15 + buckets[i + 1] * 0.15;
+            }
         }
 
         // Clear processed samples from buffer

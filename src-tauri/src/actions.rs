@@ -478,6 +478,10 @@ impl ShortcutAction for TranscribeAction {
         // Load ASR model and VAD model in parallel
         let kickoff_started = Instant::now();
         tm.initiate_model_load();
+        let settings = get_settings(app);
+        if settings.mlx_sidecar && settings.selected_model == "parakeet-tdt-0.6b-v3" {
+            crate::mlx_sidecar::warm_if_stale();
+        }
         let rm_clone = Arc::clone(&rm);
         std::thread::spawn(move || {
             if let Err(e) = rm_clone.preload_vad() {
@@ -794,17 +798,21 @@ impl ShortcutAction for TranscribeAction {
                                 return;
                             }
 
-                            // Save to history if WAV was saved
                             if wav_saved {
                                 if let Err(err) = hm.save_entry(
                                     file_name,
-                                    transcription,
+                                    transcription.clone(),
                                     post_process,
                                     processed.post_processed_text.clone(),
                                     processed.post_process_prompt.clone(),
                                 ) {
                                     error!("Failed to save history entry: {}", err);
                                 }
+                            } else if let Err(err) = hm.record_usage(
+                                &transcription,
+                                processed.post_processed_text.as_deref(),
+                            ) {
+                                error!("Failed to record usage stats: {}", err);
                             }
 
                             if processed.final_text.is_empty() {

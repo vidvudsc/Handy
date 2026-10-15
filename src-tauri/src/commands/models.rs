@@ -70,6 +70,11 @@ pub async fn delete_model(
     model_id: String,
 ) -> Result<(), String> {
     // If deleting the active model, unload it and clear the setting
+    if model_id == crate::phonon::MODEL_ID {
+        return Err(
+            "Phonon is included with Handy Beta and cannot be deleted separately".to_string(),
+        );
+    }
     let settings = get_settings(&app_handle);
     if settings.selected_model == model_id {
         transcription_manager

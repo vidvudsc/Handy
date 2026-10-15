@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "prepare:phonon": "bun scripts/prepare-phonon-coreml.ts",
     "preview": "vite preview",
     "tauri": "tauri",
     "lint": "eslint src",

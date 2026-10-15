@@ -337,8 +337,8 @@ fn create_audio_recorder(
         .with_selected_channel(selected_channel)
         .with_level_callback({
             let app_handle = app_handle.clone();
-            move |levels| {
-                utils::emit_levels(&app_handle, &levels);
+            move |spectrum, compact| {
+                utils::emit_levels(&app_handle, &spectrum, &compact);
             }
         })
         .with_audio_callback({

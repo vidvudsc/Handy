@@ -274,18 +274,20 @@ const ModelCard: React.FC<ModelCardProps> = ({
             )}
           </span>
         )}
-        {onDelete && (status === "available" || status === "active") && (
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={handleDelete}
-            title={t("modelSelector.deleteModel", { modelName: displayName })}
-            className="flex items-center gap-1.5 text-logo-primary/85 hover:text-logo-primary hover:bg-logo-primary/10"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-            <span>{t("common.delete")}</span>
-          </Button>
-        )}
+        {onDelete &&
+          model.engine_type !== "Phonon" &&
+          (status === "available" || status === "active") && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleDelete}
+              title={t("modelSelector.deleteModel", { modelName: displayName })}
+              className="flex items-center gap-1.5 text-logo-primary/85 hover:text-logo-primary hover:bg-logo-primary/10"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>{t("common.delete")}</span>
+            </Button>
+          )}
       </div>
 
       {/* Download/extract progress */}

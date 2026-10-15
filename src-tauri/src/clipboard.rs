@@ -58,13 +58,17 @@ fn paste_via_clipboard(
     paste_method: &PasteMethod,
     paste_delay_ms: u64,
     paste_delay_after_ms: u64,
+    clipboard_handling: ClipboardHandling,
 ) -> Result<(), String> {
     let clipboard = app_handle.clipboard();
-    let saved_text = clipboard.read_text().ok().filter(|t| !t.is_empty());
+    let restore_clipboard = clipboard_handling == ClipboardHandling::DontModify;
+    let saved_text = restore_clipboard
+        .then(|| clipboard.read_text().ok().filter(|t| !t.is_empty()))
+        .flatten();
     // Only probe for an image when there is no text to restore. Text is by far the
     // common case, and reading an image decodes the full bitmap, so this keeps the
     // text path exactly as cheap as it was before.
-    let saved_image = if saved_text.is_none() {
+    let saved_image = if restore_clipboard && saved_text.is_none() {
         clipboard.read_image().ok().map(|image| image.to_owned())
     } else {
         None
@@ -101,6 +105,9 @@ fn paste_via_clipboard(
     })();
 
     finish_clipboard_paste(paste_result, paste_delay_after_ms, || {
+        if !restore_clipboard {
+            return;
+        }
         // Restore original clipboard content even when key injection failed.
         // Text takes priority so this path stays identical to the previous behavior;
         // an image is only restored when the clipboard held no text at all, which is
@@ -834,6 +841,7 @@ pub fn paste(text: String, app_handle: AppHandle) -> Result<(), String> {
                 &paste_method,
                 paste_delay_ms,
                 paste_delay_after_ms,
+                settings.clipboard_handling,
             )?
         }
         PasteMethod::ExternalScript => {

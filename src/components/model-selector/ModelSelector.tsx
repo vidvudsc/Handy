@@ -43,21 +43,34 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({ onError }) => {
   const [pendingModelId, setPendingModelId] = useState<string | null>(null);
 
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const modelStateVersion = useRef(0);
 
   const displayModelId = pendingModelId || currentModel;
 
   // Check model status when currentModel changes
   useEffect(() => {
+    const version = ++modelStateVersion.current;
     const checkStatus = async () => {
       if (currentModel) {
         try {
-          const statusResult = await commands.getTranscriptionModelStatus();
+          const [statusResult, loadingResult] = await Promise.all([
+            commands.getTranscriptionModelStatus(),
+            commands.isModelLoading(),
+          ]);
+          // Startup preparation can begin before this webview subscribes.
+          // A newer lifecycle event also takes precedence over these reads.
+          if (version !== modelStateVersion.current) return;
           if (statusResult.status === "ok") {
             setModelStatus(
-              statusResult.data === currentModel ? "ready" : "unloaded",
+              loadingResult.status === "ok" && loadingResult.data
+                ? "loading"
+                : statusResult.data === currentModel
+                  ? "ready"
+                  : "unloaded",
             );
           }
         } catch {
+          if (version !== modelStateVersion.current) return;
           setModelStatus("error");
           setModelError("Failed to check model status");
         }
@@ -66,6 +79,9 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({ onError }) => {
       }
     };
     checkStatus();
+    return () => {
+      modelStateVersion.current++;
+    };
   }, [currentModel]);
 
   useEffect(() => {
@@ -73,6 +89,7 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({ onError }) => {
     const modelStateUnlisten = listen<ModelStateEvent>(
       "model-state-changed",
       (event) => {
+        modelStateVersion.current++;
         const { event_type, error } = event.payload;
         switch (event_type) {
           case "loading_started":

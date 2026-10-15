@@ -672,6 +672,15 @@ pub fn change_overlay_position_setting(app: AppHandle, position: String) -> Resu
 
 #[tauri::command]
 #[specta::specta]
+pub fn change_overlay_accent_color_setting(app: AppHandle, color: String) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    settings.overlay_accent_color = color;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
 pub fn change_overlay_style_setting(app: AppHandle, style: String) -> Result<(), String> {
     let mut settings = settings::get_settings(&app);
     let parsed = match style.as_str() {
@@ -1273,6 +1282,20 @@ pub fn change_lazy_stream_close_setting(app: AppHandle, enabled: bool) -> Result
     let mut settings = settings::get_settings(&app);
     settings.lazy_stream_close = enabled;
     settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_mlx_sidecar_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    settings.mlx_sidecar = enabled;
+    settings::write_settings(&app, settings);
+    if enabled {
+        crate::mlx_sidecar::ensure_started(&app);
+    } else {
+        crate::mlx_sidecar::shutdown();
+    }
     Ok(())
 }
 

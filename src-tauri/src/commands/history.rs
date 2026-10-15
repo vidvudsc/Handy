@@ -1,10 +1,19 @@
 use crate::actions::process_transcription_output;
 use crate::managers::{
-    history::{HistoryManager, PaginatedHistory},
+    history::{HistoryManager, PaginatedHistory, UsageStats},
     transcription::TranscriptionManager,
 };
 use std::sync::Arc;
 use tauri::{AppHandle, State};
+
+#[tauri::command]
+#[specta::specta]
+pub fn get_usage_stats(
+    _app: AppHandle,
+    history_manager: State<'_, Arc<HistoryManager>>,
+) -> Result<UsageStats, String> {
+    history_manager.get_usage_stats().map_err(|e| e.to_string())
+}
 
 #[tauri::command]
 #[specta::specta]

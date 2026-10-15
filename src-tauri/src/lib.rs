@@ -13,8 +13,10 @@ mod input;
 mod llm_client;
 mod managers;
 mod memory;
+pub mod mlx_sidecar;
 mod overlay;
 mod paste_tx;
+pub mod phonon;
 pub mod portable;
 mod secure_input;
 mod settings;
@@ -212,11 +214,19 @@ fn initialize_core_logic(app_handle: &AppHandle) {
     // Apply accelerator preferences before any model loads
     managers::transcription::apply_accelerator_settings(app_handle);
 
+    let settings = settings::get_settings(app_handle);
+    if settings.mlx_sidecar && settings.selected_model == "parakeet-tdt-0.6b-v3" {
+        mlx_sidecar::ensure_started(app_handle);
+    }
+
     // Add managers to Tauri's managed state
     app_handle.manage(recording_manager.clone());
     app_handle.manage(model_manager.clone());
     app_handle.manage(transcription_manager.clone());
     app_handle.manage(history_manager.clone());
+    if settings.selected_model == phonon::MODEL_ID {
+        transcription_manager.initiate_model_load();
+    }
     app_handle.manage(tray::TrayState::new());
 
     // Note: Shortcuts are NOT initialized here.
@@ -661,6 +671,7 @@ pub fn run(cli_args: CliArgs) {
             shortcut::change_translate_to_english_setting,
             shortcut::change_selected_language_setting,
             shortcut::change_overlay_position_setting,
+            shortcut::change_overlay_accent_color_setting,
             shortcut::change_overlay_style_setting,
             shortcut::change_debug_mode_setting,
             shortcut::change_word_correction_threshold_setting,
@@ -692,6 +703,7 @@ pub fn run(cli_args: CliArgs) {
             shortcut::change_mute_while_recording_setting,
             shortcut::change_append_trailing_space_setting,
             shortcut::change_lazy_stream_close_setting,
+            shortcut::change_mlx_sidecar_setting,
             shortcut::change_vad_enabled_setting,
             shortcut::change_vad_backend_setting,
             shortcut::change_filler_word_removal_enabled_setting,
@@ -757,6 +769,7 @@ pub fn run(cli_args: CliArgs) {
             commands::transcription::get_model_load_status,
             commands::transcription::unload_model_manually,
             commands::history::get_history_entries,
+            commands::history::get_usage_stats,
             commands::history::toggle_history_entry_saved,
             commands::history::get_audio_file_path,
             commands::history::delete_history_entry,
@@ -767,6 +780,7 @@ pub fn run(cli_args: CliArgs) {
         ])
         .events(collect_events![
             managers::history::HistoryUpdatePayload,
+            managers::history::UsageStatsUpdatePayload,
             managers::transcription::StreamTextEvent,
             managers::transcription::StreamPhaseEvent,
         ]);

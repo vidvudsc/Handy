@@ -14,19 +14,21 @@ import { getLanguageDirection } from "@/lib/utils/rtl";
 
 type OverlayState = "recording" | "streaming" | "transcribing" | "processing";
 
-// Number of reactive bars in the waveform (the simple, smoothed style shared by
-// every overlay form). Mic levels arrive as 16 FFT buckets; we take the first N.
-const WAVE_BARS = 9;
+// Handy Beta's compact pill uses four measured bands. Live receives 16 FFT
+// buckets, which are summarized into four bars in its smaller waveform.
+const WAVE_BARS = 4;
 
 const RecordingOverlay: React.FC = () => {
   const { t } = useTranslation();
   const [isVisible, setIsVisible] = useState(false);
+  const [shouldRender, setShouldRender] = useState(false);
   const [state, setState] = useState<OverlayState>("recording");
   // `Stream::play()` returning does not mean hardware callbacks are flowing.
   // Stay visually in an arming state until the backend processes the first
   // actual microphone sample chunk.
   const [captureReady, setCaptureReady] = useState(false);
   const [levels, setLevels] = useState<number[]>(Array(WAVE_BARS).fill(0));
+  const [accentColor, setAccentColor] = useState("#ffffff");
   const [streamText, setStreamText] = useState<StreamTextEvent>({
     committed: "",
     tentative: "",
@@ -44,7 +46,11 @@ const RecordingOverlay: React.FC = () => {
   // while overflowing, so the resting first line stays crisp flush under the pill.
   const [overflowing, setOverflowing] = useState(false);
 
-  const smoothedLevelsRef = useRef<number[]>(Array(16).fill(0));
+  const smoothedLevelsRef = useRef<number[]>(Array(WAVE_BARS).fill(0));
+  const compactTargetsRef = useRef<number[]>(Array(WAVE_BARS).fill(0));
+  const compactBarsRef = useRef<(HTMLSpanElement | null)[]>([]);
+  const stateRef = useRef<OverlayState | null>(null);
+  const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Live-text scroll-back: the text region "sticks" to the newest line while the
   // user is at the bottom; if they scroll up to read history, auto-follow pauses
   // until they scroll back down.
@@ -54,30 +60,34 @@ const RecordingOverlay: React.FC = () => {
 
   useEffect(() => {
     const setupEventListeners = async () => {
-      const unlistenShow = await listen("show-overlay", async (event) => {
+      const unlistenShow = await listen("show-overlay", (event) => {
         const overlayState = event.payload as OverlayState;
-        // Reset synchronously before settings I/O. A fast microphone can emit
-        // recording-ready while the awaits below are in flight; resetting after
-        // them would overwrite that event and leave the overlay stuck arming.
+        stateRef.current = overlayState;
+        // Render the new state before doing any settings I/O. In particular, a
+        // short MLX transcription can finish while those reads are pending.
         if (overlayState === "recording" || overlayState === "streaming") {
           setCaptureReady(false);
-          smoothedLevelsRef.current = Array(16).fill(0);
+          smoothedLevelsRef.current = Array(WAVE_BARS).fill(0);
+          compactTargetsRef.current = Array(WAVE_BARS).fill(0);
           setLevels(Array(WAVE_BARS).fill(0));
           setStreamText({ committed: "", tentative: "" });
-        }
 
-        await syncLanguageFromSettings();
-        // The Live panel flows downward from a top overlay and upward from a
-        // bottom one; read the placement so the layout can flip to match.
-        try {
-          const settings = await commands.getAppSettings();
-          if (settings.status === "ok") {
-            setPosition(
-              settings.data.overlay_position === "top" ? "top" : "bottom",
-            );
-          }
-        } catch {
-          // Keep the previous/default placement if settings can't be read.
+          void syncLanguageFromSettings();
+          // Placement and accent only need refreshing at the start of a session.
+          // Neither may hold up recording, transcribing, or the hide animation.
+          void commands
+            .getAppSettings()
+            .then((settings) => {
+              if (settings.status === "ok") {
+                setAccentColor(settings.data.overlay_accent_color || "#ffffff");
+                setPosition(
+                  settings.data.overlay_position === "top" ? "top" : "bottom",
+                );
+              }
+            })
+            .catch(() => {
+              // Keep the previous/default placement if settings can't be read.
+            });
         }
         setState(overlayState);
         if (overlayState === "streaming") {
@@ -86,12 +96,24 @@ const RecordingOverlay: React.FC = () => {
           setElapsed(0);
           setSession((s) => s + 1); // remount the card fresh for this session
         }
+        if (hideTimerRef.current !== null) {
+          clearTimeout(hideTimerRef.current);
+          hideTimerRef.current = null;
+        }
+        setShouldRender(true);
         setIsVisible(true);
       });
 
       const unlistenHide = await listen("hide-overlay", () => {
+        stateRef.current = null;
         setIsVisible(false);
-        setCaptureReady(false);
+        if (hideTimerRef.current !== null) clearTimeout(hideTimerRef.current);
+        // Rust hides the native window after 300ms. Keep the DOM through the
+        // compact fade and the Live card's leave transition, then stop animating.
+        hideTimerRef.current = setTimeout(() => {
+          setShouldRender(false);
+          hideTimerRef.current = null;
+        }, 300);
       });
 
       const unlistenReady = await listen("recording-ready", () => {
@@ -100,15 +122,35 @@ const RecordingOverlay: React.FC = () => {
       });
 
       const unlistenLevel = await listen<number[]>("mic-level", (event) => {
+        const overlayState = stateRef.current;
+        if (overlayState !== "recording" && overlayState !== "streaming")
+          return;
         const newLevels = event.payload as number[];
-        // Exponential smoothing across the 16 buckets, then take the first N
-        // bars for the shared waveform.
+        if (overlayState === "recording") {
+          // Audio arrives at 20 Hz. Store the latest measured shape without
+          // rerendering the overlay; the frame loop interpolates between samples.
+          compactTargetsRef.current = Array.from(
+            { length: WAVE_BARS },
+            (_, i) => {
+              const value = newLevels[i];
+              return Number.isFinite(value)
+                ? Math.max(0, Math.min(1, value))
+                : 0;
+            },
+          );
+          return;
+        }
+        // The backend sends Beta's original four RMS-weighted bands for the
+        // compact pill and the newer 16-bucket spectrum for Live.
+        const bands = Array.from({ length: WAVE_BARS }, (_, i) =>
+          Math.max(0, ...newLevels.slice(i * 4, i * 4 + 4)),
+        );
         const smoothed = smoothedLevelsRef.current.map((prev, i) => {
-          const target = newLevels[i] || 0;
-          return prev * 0.7 + target * 0.3;
+          const target = bands[i] || 0;
+          return prev * 0.2 + target * 0.8;
         });
         smoothedLevelsRef.current = smoothed;
-        setLevels(smoothed.slice(0, WAVE_BARS));
+        setLevels(smoothed);
       });
 
       const unlistenStream = await events.streamTextEvent.listen((event) => {
@@ -131,8 +173,40 @@ const RecordingOverlay: React.FC = () => {
       };
     };
 
-    setupEventListeners();
+    let disposed = false;
+    let cleanup: (() => void) | undefined;
+    void setupEventListeners().then((unlisten) => {
+      if (disposed) unlisten();
+      else cleanup = unlisten;
+    });
+    return () => {
+      disposed = true;
+      cleanup?.();
+      if (hideTimerRef.current !== null) clearTimeout(hideTimerRef.current);
+    };
   }, []);
+
+  useEffect(() => {
+    if (!isVisible || state !== "recording" || !captureReady) return;
+    let frame: number;
+    let previous = performance.now();
+    const displayed = Array(WAVE_BARS).fill(0) as number[];
+    const animate = (now: number) => {
+      // Time-based easing is consistent on 60 Hz and ProMotion displays.
+      const blend = 1 - Math.exp(-Math.min(now - previous, 100) / 35);
+      previous = now;
+      compactBarsRef.current.forEach((bar, i) => {
+        if (!bar) return;
+        displayed[i] += (compactTargetsRef.current[i] - displayed[i]) * blend;
+        const level = displayed[i];
+        bar.style.transform = `scaleY(${(4 + Math.sqrt(level) * 16) / 20})`;
+        bar.style.opacity = String(Math.min(1, 0.5 + level * 3));
+      });
+      frame = requestAnimationFrame(animate);
+    };
+    frame = requestAnimationFrame(animate);
+    return () => cancelAnimationFrame(frame);
+  }, [isVisible, state, captureReady]);
 
   // Elapsed capture timer starts only once microphone samples are flowing.
   useEffect(() => {
@@ -157,7 +231,7 @@ const RecordingOverlay: React.FC = () => {
     setOverflowing(false);
   }, [session]);
 
-  if (!isVisible) return null;
+  if (!shouldRender) return null;
 
   // Re-pin when the user is within ~a line of the bottom; unpin otherwise.
   const handleStreamScroll = () => {
@@ -240,7 +314,11 @@ const RecordingOverlay: React.FC = () => {
     const collapsed = working && !hasText;
 
     return (
-      <div dir={direction} className={`ov-stage ${position}`}>
+      <div
+        dir={direction}
+        className={`ov-stage ${position}`}
+        style={{ "--s-accent": accentColor } as React.CSSProperties}
+      >
         <div
           key={session}
           className={`scard ${open ? "open" : ""} ${collapsed ? "working" : ""} ${
@@ -279,24 +357,30 @@ const RecordingOverlay: React.FC = () => {
     );
   }
 
-  // ---- Minimal overlay: exactly one row at a time — waveform (recording), or a
-  // spinner + label (transcribing / processing). Never both. The pill animates its
-  // width between them; the cancel button is in both rows so it stays put.
+  // ---- Keep Handy Beta's minimal four-bar pill for batch transcription. ----
   const working = state === "transcribing" || state === "processing";
-  const workLabel =
-    state === "processing"
-      ? t("overlay.processing")
-      : t("overlay.transcribing");
 
   return (
     <div
       dir={direction}
       className={`ov-stage ${position} ov-fade ${isVisible ? "show" : ""}`}
     >
-      <div
-        className={`scard compact ${working && isVisible ? "cworking" : ""}`}
-      >
-        {working ? workingRow(workLabel, true) : listeningRow(false, true)}
+      <div className="beta-compact">
+        {Array.from({ length: WAVE_BARS }, (_, i) => (
+          <span
+            key={i}
+            ref={(bar) => {
+              compactBarsRef.current[i] = bar;
+            }}
+            className={working ? "beta-bar loading" : "beta-bar"}
+            style={{
+              transform: working ? undefined : "scaleY(0.2)",
+              opacity: working ? undefined : 0.5,
+              background: accentColor,
+              animationDelay: `${i * 0.12}s`,
+            }}
+          />
+        ))}
       </div>
     </div>
   );

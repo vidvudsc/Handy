@@ -421,6 +421,8 @@ pub struct AppSettings {
     pub selected_language: String,
     #[serde(default = "default_overlay_position")]
     pub overlay_position: OverlayPosition,
+    #[serde(default = "default_overlay_accent_color")]
+    pub overlay_accent_color: String,
     #[serde(default = "default_debug_mode")]
     pub debug_mode: bool,
     #[serde(default = "default_log_level")]
@@ -504,6 +506,8 @@ pub struct AppSettings {
     pub transcribe_gpu_device: Option<String>,
     #[serde(default)]
     pub extra_recording_buffer_ms: u64,
+    #[serde(default)]
+    pub mlx_sidecar: bool,
     #[serde(default = "default_vad_enabled")]
     pub vad_enabled: bool,
     /// Experimental detector implementation. Silero remains the stable default.
@@ -547,7 +551,7 @@ fn default_autostart_enabled() -> bool {
 }
 
 fn default_update_checks_enabled() -> bool {
-    true
+    false
 }
 
 fn default_show_whats_new_on_update() -> bool {
@@ -585,6 +589,10 @@ fn default_filler_word_removal_enabled() -> bool {
     true
 }
 
+fn default_overlay_accent_color() -> String {
+    "#ffffff".to_string()
+}
+
 fn default_debug_mode() -> bool {
     false
 }
@@ -598,7 +606,7 @@ fn default_word_correction_threshold() -> f64 {
 }
 
 fn default_paste_delay_ms() -> u64 {
-    60
+    10
 }
 
 fn default_paste_delay_after_ms() -> u64 {
@@ -896,14 +904,19 @@ pub fn get_default_settings() -> AppSettings {
             current_binding: default_post_process_shortcut.to_string(),
         },
     );
+    #[cfg(target_os = "macos")]
+    let default_cancel_shortcut = "cmd+k";
+    #[cfg(not(target_os = "macos"))]
+    let default_cancel_shortcut = "escape";
+
     bindings.insert(
         "cancel".to_string(),
         ShortcutBinding {
             id: "cancel".to_string(),
             name: "Cancel".to_string(),
             description: "Cancels the current recording.".to_string(),
-            default_binding: "escape".to_string(),
-            current_binding: "escape".to_string(),
+            default_binding: default_cancel_shortcut.to_string(),
+            current_binding: default_cancel_shortcut.to_string(),
         },
     );
 
@@ -930,6 +943,7 @@ pub fn get_default_settings() -> AppSettings {
         translate_to_english: false,
         selected_language: "auto".to_string(),
         overlay_position: default_overlay_position(),
+        overlay_accent_color: default_overlay_accent_color(),
         debug_mode: false,
         log_level: default_log_level(),
         custom_words: Vec::new(),
@@ -967,6 +981,7 @@ pub fn get_default_settings() -> AppSettings {
         ort_accelerator: OrtAcceleratorSetting::default(),
         transcribe_gpu_device: default_transcribe_gpu_device(),
         extra_recording_buffer_ms: 0,
+        mlx_sidecar: false,
         vad_enabled: default_vad_enabled(),
         vad_backend: VadBackend::default(),
         overlay_style: default_overlay_style(),

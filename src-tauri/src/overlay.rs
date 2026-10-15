@@ -63,6 +63,9 @@ fn overlay_dimensions(state: &str) -> (f64, f64) {
 }
 
 static LAST_MIC_LEVEL_EMIT: AtomicU64 = AtomicU64::new(0);
+// Choose the 16-band Live spectrum or the original four-band Beta meter while
+// keeping one throttled event per audio update.
+static LIVE_LEVELS_ENABLED: AtomicBool = AtomicBool::new(false);
 const EMIT_THROTTLE_MS: u64 = 33; // ~30 FPS
 
 #[cfg(target_os = "macos")]
@@ -467,7 +470,16 @@ pub fn create_recording_overlay(app_handle: &AppHandle) {
             .no_activate(true)
             .corner_radius(0.0)
             .style_mask(StyleMask::empty().borderless().nonactivating_panel())
-            .with_window(|w| w.decorations(false).transparent(true).focusable(false))
+            .with_window(|w| {
+                // This nonactivating panel stays behind the focused app. Keep
+                // WebKit from suspending its mic feedback after idle periods.
+                w.decorations(false)
+                    .transparent(true)
+                    .focusable(false)
+                    .background_throttling(
+                        tauri::utils::config::BackgroundThrottlingPolicy::Disabled,
+                    )
+            })
             .collection_behavior(
                 CollectionBehavior::new()
                     .can_join_all_spaces()
@@ -511,6 +523,7 @@ fn show_overlay_state_on_main(app_handle: &AppHandle, state: &str) {
     // Size the overlay for this state (compact vs. streaming), then position it.
     let (width, height) = overlay_dimensions(state);
     if let Some(overlay_window) = app_handle.get_webview_window("recording_overlay") {
+        LIVE_LEVELS_ENABLED.store(state == "streaming", Ordering::Relaxed);
         // Invalidate any delayed hide still in flight from a previous session
         // (see `hide_recording_overlay`).
         OVERLAY_SHOW_GENERATION.fetch_add(1, Ordering::SeqCst);
@@ -687,6 +700,7 @@ static OVERLAY_SHOW_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// Hides the recording overlay window with fade-out animation
 pub fn hide_recording_overlay(app_handle: &AppHandle) {
+    LIVE_LEVELS_ENABLED.store(false, Ordering::Relaxed);
     // Always hide the overlay regardless of settings - if setting was changed while recording,
     // we still want to hide it properly
     if let Some(overlay_window) = app_handle.get_webview_window("recording_overlay") {
@@ -727,7 +741,7 @@ pub fn update_overlay_enabled_cache(enabled: bool) {
     OVERLAY_ENABLED.store(enabled, Ordering::Relaxed);
 }
 
-pub fn emit_levels(app_handle: &AppHandle, levels: &[f32]) {
+pub fn emit_levels(app_handle: &AppHandle, spectrum: &[f32], compact: &[f32]) {
     // Skip emission when the overlay is disabled. The recording_overlay
     // window is created at boot regardless of overlay_style, so without this
     // guard a hidden overlay's WebKit subprocess still
@@ -763,6 +777,11 @@ pub fn emit_levels(app_handle: &AppHandle, levels: &[f32]) {
     // `emit_to` with the overlay's window label produces a single
     // eval_script call per callback, cutting the per-callback WebKit
     // dispatch work in half.
+    let levels = if LIVE_LEVELS_ENABLED.load(Ordering::Relaxed) {
+        spectrum
+    } else {
+        compact
+    };
     let _ = app_handle.emit_to("recording_overlay", "mic-level", levels);
 }
 

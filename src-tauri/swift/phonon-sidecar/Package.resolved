@@ -1,0 +1,14 @@
+{
+  "originHash" : "0f0e16d27b76073a1863732bac0840f40f4d007955f4426ed55bd8f235156fe8",
+  "pins" : [
+    {
+      "identity" : "phonon-coreml",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/fermionresearch/phonon-coreml",
+      "state" : {
+        "revision" : "bf59e574639b060e30ee1a3f9c0e003fed5744c8"
+      }
+    }
+  ],
+  "version" : 3
+}

@@ -16,7 +16,8 @@
     "postProcessing": "Post Process",
     "history": "History",
     "debug": "Debug",
-    "about": "About"
+    "about": "About",
+    "dashboard": "Dashboard"
   },
   "onboarding": {
     "subtitle": "To get started, choose a transcription model",
@@ -31,6 +32,10 @@
       "speed": "speed"
     },
     "models": {
+      "phonon-2-coreml": {
+        "name": "Phonon-2 Core ML",
+        "description": "English dictation on the Apple Neural Engine. Included with Handy Beta. The first setup prepares the model for your Mac."
+      },
       "small": {
         "name": "Whisper Small",
         "description": "Fast and fairly accurate."
@@ -285,6 +290,10 @@
         },
         "gpuDevice": {
           "auto": "Auto"
+        },
+        "mlxSidecar": {
+          "label": "MLX (Apple GPU)",
+          "description": "Run Parakeet transcription on the Apple GPU via an MLX sidecar process. Falls back to the regular engine if unavailable."
         }
       },
       "startHidden": {
@@ -382,6 +391,11 @@
         "add": "Add",
         "remove": "Remove {{word}}",
         "duplicate": "\"{{word}}\" already exists"
+      },
+      "overlayColor": {
+        "title": "Overlay Color",
+        "description": "Accent color of the waveform bars shown in the recording overlay.",
+        "presets": "Presets"
       },
       "voiceActivityDetection": {
         "title": "Voice Activity Detection",
@@ -703,6 +717,34 @@
   "overlay": {
     "transcribing": "Transcribing...",
     "processing": "Processing..."
+  },
+  "dashboard": {
+    "title": "Usage Dashboard",
+    "subtitle": "Your dictation activity over the past year.",
+    "empty": "No dictations yet. Start dictating to see your activity here.",
+    "stats": {
+      "totalTranscriptions": "Total dictations",
+      "totalWords": "Total words",
+      "activeDays": "Active days",
+      "currentStreak": "Current streak",
+      "longestStreak": "Longest streak",
+      "dailyAverage": "Daily average",
+      "dailyWordAverage": "Avg words/day",
+      "days": "days",
+      "perActiveDay": "dictations per active day",
+      "wordsPerActiveDay": "words per active day"
+    },
+    "grid": {
+      "less": "Less",
+      "more": "More",
+      "noActivity": "No dictations",
+      "oneTranscription": "1 dictation",
+      "nTranscriptions": "{{count}} dictations",
+      "noWords": "0 words",
+      "oneWord": "1 word",
+      "nWords": "{{count}} words",
+      "onDate": "on {{date}}"
+    }
   },
   "secureInput": {
     "blockedWithCulprit_one": "{{name}} may be blocking 1 shortcut",

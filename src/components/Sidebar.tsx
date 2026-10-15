@@ -1,6 +1,14 @@
 import React from "react";
 import { useTranslation } from "react-i18next";
-import { Cog, FlaskConical, History, Info, Sparkles, Cpu } from "lucide-react";
+import {
+  Cog,
+  FlaskConical,
+  History,
+  Info,
+  Sparkles,
+  Cpu,
+  LayoutGrid,
+} from "lucide-react";
 import HandyTextLogo from "./icons/HandyTextLogo";
 import HandyHand from "./icons/HandyHand";
 import { useSettings } from "../hooks/useSettings";
@@ -8,6 +16,7 @@ import {
   GeneralSettings,
   AdvancedSettings,
   HistorySettings,
+  UsageDashboard,
   DebugSettings,
   AboutSettings,
   PostProcessingSettings,
@@ -56,6 +65,13 @@ export const SECTIONS_CONFIG = {
     component: AdvancedSettings,
     enabled: () => true,
   },
+  dashboard: {
+    labelKey: "sidebar.dashboard",
+    icon: LayoutGrid,
+    component: UsageDashboard,
+    enabled: () => true,
+  },
+
   postprocessing: {
     labelKey: "sidebar.postProcessing",
     icon: Sparkles,

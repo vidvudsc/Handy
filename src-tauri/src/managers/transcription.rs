@@ -8,7 +8,7 @@ use crate::settings::{
     get_settings, AppSettings, ModelUnloadTimeout, OrtAcceleratorSetting,
     TranscribeAcceleratorSetting,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -182,6 +182,7 @@ enum LoadedEngine {
     /// internally, so repeated dictation reuses the session without reloading.
     TranscribeCpp(Session),
     Parakeet(ParakeetModel),
+    Phonon(crate::phonon::PhononEngine),
     Moonshine(MoonshineModel),
     MoonshineStreaming(StreamingModel),
     SenseVoice(SenseVoiceModel),
@@ -556,6 +557,12 @@ impl TranscriptionManager {
         // Create appropriate engine based on model type
 
         let loaded_engine = match model_info.engine_type {
+            EngineType::Phonon => {
+                crate::mlx_sidecar::shutdown();
+                let engine = crate::phonon::PhononEngine::load(&self.app_handle, &model_path)
+                    .inspect_err(|error| emit_loading_failed(&error.to_string()))?;
+                LoadedEngine::Phonon(engine)
+            }
             EngineType::TranscribeCpp => {
                 // The whisper backend is chosen at load time (transcribe-cpp has
                 // no runtime global). With an explicit `device_index` (the
@@ -742,6 +749,14 @@ impl TranscriptionManager {
 
     /// Kicks off the model loading in a background thread if it's not already loaded
     pub fn initiate_model_load(&self) {
+        let settings = get_settings(&self.app_handle);
+        // The persistent MLX process already holds this specific model. Avoid
+        // loading another copy into the CPU engine on every recording.
+        if settings.mlx_sidecar && settings.selected_model == "parakeet-tdt-0.6b-v3" {
+            crate::mlx_sidecar::ensure_started(&self.app_handle);
+            return;
+        }
+
         let mut is_loading = self.is_loading.lock().unwrap();
         if *is_loading {
             return;
@@ -785,6 +800,7 @@ impl TranscriptionManager {
             Some(LoadedEngine::TranscribeCpp(session)) => {
                 Some(session.model().backend().to_string())
             }
+            Some(LoadedEngine::Phonon(_)) => Some("coreml-neural-engine".to_string()),
             Some(_) => Some("onnx".to_string()),
             None => None,
         }
@@ -1195,23 +1211,56 @@ impl TranscriptionManager {
             return Ok(String::new());
         }
 
-        // Check if model is loaded, if not try to load it
+        let settings = get_settings(&self.app_handle);
+        // This sidecar serves the legacy Parakeet V3 model specifically. New
+        // GGUF Parakeet variants have different IDs and use transcribe.cpp.
+        let loaded_model = self.get_current_model();
+        if settings.mlx_sidecar
+            && settings.selected_model == "parakeet-tdt-0.6b-v3"
+            && loaded_model
+                .as_deref()
+                .is_none_or(|id| id == "parakeet-tdt-0.6b-v3")
+        {
+            crate::mlx_sidecar::ensure_started(&self.app_handle);
+            if let Some(Ok(raw)) = crate::mlx_sidecar::transcribe_if_ready(&audio) {
+                let languages = self
+                    .model_manager
+                    .get_model_info(&settings.selected_model)
+                    .map(|info| info.supported_languages)
+                    .unwrap_or_default();
+                let output_language =
+                    resolve_output_language_evidence(&settings, None, &languages, false);
+                let result = post_process_transcription_text(
+                    raw,
+                    &settings,
+                    false,
+                    &output_language,
+                    &languages,
+                );
+                info!(
+                    "MLX transcription completed in {}ms",
+                    st.elapsed().as_millis()
+                );
+                self.maybe_unload_immediately("MLX transcription");
+                return Ok(result);
+            }
+        }
+
+        // Wait for any in-progress model load before using the fallback engine.
         {
             // If the model is loading, wait for it to complete.
             let mut is_loading = self.is_loading.lock().unwrap();
             while *is_loading {
                 is_loading = self.loading_condvar.wait(is_loading).unwrap();
             }
-
-            let engine_guard = self.lock_engine();
-            if engine_guard.is_none() {
-                return Err(anyhow::anyhow!("Model is not loaded for transcription."));
-            }
+        }
+        // The MLX path avoids preloading the CPU model. If the sidecar is not
+        // ready or fails, load the fallback engine here before transcription.
+        if !self.is_model_loaded() {
+            self.load_model(&settings.selected_model)?;
         }
 
         // Get current settings for configuration
-        let settings = get_settings(&self.app_handle);
-
         // Validate selected language against the model's supported languages.
         // If the language isn't supported, fall back to "auto" to prevent errors.
         // Validate against the model that's actually loaded (which can differ
@@ -1301,6 +1350,20 @@ impl TranscriptionManager {
 
             let transcribe_result = catch_unwind(AssertUnwindSafe(|| -> Result<String> {
                 match &mut engine {
+                    LoadedEngine::Phonon(phonon_engine) => {
+                        applied_language_hint = Some("en".to_string());
+                        phonon_engine.transcribe(&audio).or_else(|error| {
+                            warn!("Phonon request failed; trying the downloaded Parakeet V3 fallback: {error:#}");
+                            let path = self.model_manager.get_model_path("parakeet-tdt-0.6b-v3")
+                                .with_context(|| format!("Phonon failed ({error}); Parakeet fallback is unavailable"))?;
+                            let mut fallback = ParakeetModel::load(&path, &Quantization::Int8)
+                                .map_err(|e| anyhow::anyhow!("Parakeet fallback load failed: {e}"))?;
+                            fallback.transcribe_with(&audio, &ParakeetParams {
+                                timestamp_granularity: Some(TimestampGranularity::Segment),
+                                ..Default::default()
+                            }).map(|r| r.text).map_err(|e| anyhow::anyhow!("Parakeet fallback transcription failed: {e}"))
+                        })
+                    }
                     LoadedEngine::TranscribeCpp(session) => {
                         // Custom words become the initial prompt ONLY for models
                         // that accept one (whisper family). Attaching the

@@ -1,6 +1,7 @@
 use super::{
     is_microphone_access_denied, is_no_input_device_error, run_consumer, AudioRecorder,
-    CaptureProcessor, CaptureTransportState, ChunkDisposition, Cmd, VadConfig, VadPolicy,
+    CaptureProcessor, CaptureTransportState, ChunkDisposition, Cmd, CompactMeter, VadConfig,
+    VadPolicy,
 };
 use crate::audio_toolkit::vad::{VadFrame, VoiceActivityDetector};
 use rtrb::RingBuffer;
@@ -17,6 +18,26 @@ use std::{
 fn unopened_recorder_does_not_need_reopen() {
     let recorder = AudioRecorder::new().expect("recorder");
     assert!(!recorder.needs_reopen());
+}
+
+#[test]
+fn compact_meter_follows_voice_and_returns_toward_rest_on_silence() {
+    let mut meter = CompactMeter::new(16_000, 512);
+    let voice: Vec<f32> = (0..512)
+        .map(|i| 0.04 * (2.0 * std::f32::consts::PI * 220.0 * i as f32 / 16_000.0).sin())
+        .collect();
+
+    meter.last_emit = Instant::now() - Duration::from_millis(51);
+    let speaking = meter.feed(&voice).expect("meter emits after 50ms");
+    assert!(speaking.iter().all(|level| *level > 0.1));
+    assert!(speaking[0] > speaking[3]);
+
+    meter.last_emit = Instant::now() - Duration::from_millis(51);
+    let silence = meter.feed(&[0.0; 512]).expect("meter emits silence");
+    assert!(silence
+        .iter()
+        .zip(speaking)
+        .all(|(idle, voice)| *idle < voice));
 }
 
 #[test]

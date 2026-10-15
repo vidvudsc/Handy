@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Local, TimeZone, Utc};
 use log::{debug, error, info};
 use rusqlite::{params, Connection, OptionalExtension};
 use rusqlite_migration::{Migrations, M};
@@ -31,12 +31,65 @@ static MIGRATIONS: &[M] = &[
     M::up("ALTER TABLE transcription_history ADD COLUMN post_processed_text TEXT;"),
     M::up("ALTER TABLE transcription_history ADD COLUMN post_process_prompt TEXT;"),
     M::up("ALTER TABLE transcription_history ADD COLUMN post_process_requested BOOLEAN NOT NULL DEFAULT 0;"),
+    M::up("ALTER TABLE transcription_history ADD COLUMN usage_recorded BOOLEAN NOT NULL DEFAULT 0;"),
+    M::up(
+        "CREATE TABLE IF NOT EXISTS usage_stats_daily (
+            day INTEGER PRIMARY KEY,
+            count INTEGER NOT NULL DEFAULT 0,
+            words INTEGER NOT NULL DEFAULT 0
+        );
+
+        INSERT OR REPLACE INTO usage_stats_daily (day, count, words)
+        SELECT
+            CAST(strftime('%s', date(timestamp, 'unixepoch', 'localtime')) AS INTEGER) AS day,
+            COUNT(*) AS count,
+            COALESCE(SUM(
+                CASE
+                    WHEN trim(COALESCE(NULLIF(post_processed_text, ''), transcription_text)) = '' THEN 0
+                    ELSE LENGTH(trim(COALESCE(NULLIF(post_processed_text, ''), transcription_text)))
+                         - LENGTH(REPLACE(trim(COALESCE(NULLIF(post_processed_text, ''), transcription_text)), ' ', ''))
+                         + 1
+                END
+            ), 0) AS words
+        FROM transcription_history
+        WHERE trim(COALESCE(NULLIF(post_processed_text, ''), transcription_text)) != ''
+        GROUP BY day;
+
+        UPDATE transcription_history
+        SET usage_recorded = 1
+        WHERE trim(COALESCE(NULLIF(post_processed_text, ''), transcription_text)) != '';",
+    ),
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
 pub struct PaginatedHistory {
     pub entries: Vec<HistoryEntry>,
     pub has_more: bool,
+}
+
+/// One day's worth of dictation activity, used by the usage dashboard.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+pub struct UsageDay {
+    /// Unix timestamp (seconds) for the start of the day in local time.
+    pub day: i64,
+    /// Number of transcriptions recorded that day.
+    pub count: i64,
+    /// Approximate total words transcribed that day.
+    pub words: i64,
+}
+
+/// Aggregate usage statistics derived from the transcription history.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+pub struct UsageStats {
+    /// Per-day activity, ordered ascending by day.
+    pub days: Vec<UsageDay>,
+    pub total_transcriptions: i64,
+    pub total_words: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Type, tauri_specta::Event)]
+pub struct UsageStatsUpdatePayload {
+    pub stats: UsageStats,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Type, tauri_specta::Event)]
@@ -214,6 +267,102 @@ impl HistoryManager {
         &self.recordings_dir
     }
 
+    fn effective_text<'a>(
+        transcription_text: &'a str,
+        post_processed_text: Option<&'a str>,
+    ) -> &'a str {
+        post_processed_text
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or(transcription_text)
+    }
+
+    fn word_count(text: &str) -> i64 {
+        text.split_whitespace().count() as i64
+    }
+
+    fn local_day_start(timestamp: i64) -> i64 {
+        let Some(utc_datetime) = DateTime::from_timestamp(timestamp, 0) else {
+            return timestamp;
+        };
+        let local_datetime = utc_datetime.with_timezone(&Local);
+        let Some(local_midnight) = local_datetime.date_naive().and_hms_opt(0, 0, 0) else {
+            return timestamp;
+        };
+
+        Local
+            .from_local_datetime(&local_midnight)
+            .single()
+            .or_else(|| Local.from_local_datetime(&local_midnight).earliest())
+            .map(|dt| dt.timestamp())
+            .unwrap_or(timestamp)
+    }
+
+    fn upsert_usage_day(
+        &self,
+        conn: &Connection,
+        day: i64,
+        count_delta: i64,
+        words_delta: i64,
+    ) -> Result<()> {
+        if count_delta == 0 && words_delta == 0 {
+            return Ok(());
+        }
+
+        conn.execute(
+            "INSERT INTO usage_stats_daily (day, count, words)
+             VALUES (?1, MAX(?2, 0), MAX(?3, 0))
+             ON CONFLICT(day) DO UPDATE SET
+                 count = MAX(usage_stats_daily.count + ?2, 0),
+                 words = MAX(usage_stats_daily.words + ?3, 0)",
+            params![day, count_delta, words_delta],
+        )?;
+
+        Ok(())
+    }
+
+    fn emit_usage_stats_updated(&self) {
+        match self.get_usage_stats() {
+            Ok(stats) => {
+                if let Err(e) = (UsageStatsUpdatePayload { stats }).emit(&self.app_handle) {
+                    error!("Failed to emit usage-stats-updated event: {}", e);
+                }
+            }
+            Err(e) => error!("Failed to load usage stats for update event: {}", e),
+        }
+    }
+
+    /// Record a successful transcription in the durable usage stats table.
+    /// This is intentionally independent from history retention/deletion so
+    /// dashboard totals survive cleanup and app updates.
+    pub fn record_usage(
+        &self,
+        transcription_text: &str,
+        post_processed_text: Option<&str>,
+    ) -> Result<()> {
+        let timestamp = Utc::now().timestamp();
+        self.record_usage_at(timestamp, transcription_text, post_processed_text)
+    }
+
+    fn record_usage_at(
+        &self,
+        timestamp: i64,
+        transcription_text: &str,
+        post_processed_text: Option<&str>,
+    ) -> Result<()> {
+        let effective_text = Self::effective_text(transcription_text, post_processed_text);
+        let words = Self::word_count(effective_text);
+        if words == 0 {
+            return Ok(());
+        }
+
+        let conn = self.get_connection()?;
+        let day = Self::local_day_start(timestamp);
+        self.upsert_usage_day(&conn, day, 1, words)?;
+        self.emit_usage_stats_updated();
+
+        Ok(())
+    }
+
     /// Save a new history entry to the database.
     /// The WAV file should already have been written to the recordings directory.
     pub fn save_entry(
@@ -226,6 +375,10 @@ impl HistoryManager {
     ) -> Result<HistoryEntry> {
         let timestamp = Utc::now().timestamp();
         let title = self.format_timestamp_title(timestamp);
+        let effective_text =
+            Self::effective_text(&transcription_text, post_processed_text.as_deref());
+        let usage_words = Self::word_count(effective_text);
+        let usage_recorded = usage_words > 0;
 
         let conn = self.get_connection()?;
         conn.execute(
@@ -237,8 +390,9 @@ impl HistoryManager {
                 transcription_text,
                 post_processed_text,
                 post_process_prompt,
-                post_process_requested
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                post_process_requested,
+                usage_recorded
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 &file_name,
                 timestamp,
@@ -248,8 +402,14 @@ impl HistoryManager {
                 &post_processed_text,
                 &post_process_prompt,
                 post_process_requested,
+                usage_recorded,
             ],
         )?;
+
+        if usage_recorded {
+            let day = Self::local_day_start(timestamp);
+            self.upsert_usage_day(&conn, day, 1, usage_words)?;
+        }
 
         let entry = HistoryEntry {
             id: conn.last_insert_rowid(),
@@ -276,6 +436,10 @@ impl HistoryManager {
             error!("Failed to emit history-updated event: {}", e);
         }
 
+        if usage_recorded {
+            self.emit_usage_stats_updated();
+        }
+
         Ok(entry)
     }
 
@@ -288,16 +452,45 @@ impl HistoryManager {
         post_process_prompt: Option<String>,
     ) -> Result<HistoryEntry> {
         let conn = self.get_connection()?;
+        let (timestamp, old_transcription_text, old_post_processed_text, old_usage_recorded): (
+            i64,
+            String,
+            Option<String>,
+            bool,
+        ) = conn.query_row(
+            "SELECT timestamp, transcription_text, post_processed_text, usage_recorded
+             FROM transcription_history
+             WHERE id = ?1",
+            params![id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+
+        let old_words = if old_usage_recorded {
+            Self::word_count(Self::effective_text(
+                &old_transcription_text,
+                old_post_processed_text.as_deref(),
+            ))
+        } else {
+            0
+        };
+        let new_words = Self::word_count(Self::effective_text(
+            &transcription_text,
+            post_processed_text.as_deref(),
+        ));
+        let new_usage_recorded = old_usage_recorded || new_words > 0;
+
         let updated = conn.execute(
             "UPDATE transcription_history
              SET transcription_text = ?1,
                  post_processed_text = ?2,
-                 post_process_prompt = ?3
-             WHERE id = ?4",
+                 post_process_prompt = ?3,
+                 usage_recorded = ?4
+             WHERE id = ?5",
             params![
                 transcription_text,
                 post_processed_text,
                 post_process_prompt,
+                new_usage_recorded,
                 id
             ],
         )?;
@@ -316,12 +509,27 @@ impl HistoryManager {
 
         debug!("Updated transcription for history entry {}", id);
 
+        let mut usage_changed = false;
+        if !old_usage_recorded && new_words > 0 {
+            let day = Self::local_day_start(timestamp);
+            self.upsert_usage_day(&conn, day, 1, new_words)?;
+            usage_changed = true;
+        } else if old_usage_recorded && new_words > 0 && new_words != old_words {
+            let day = Self::local_day_start(timestamp);
+            self.upsert_usage_day(&conn, day, 0, new_words - old_words)?;
+            usage_changed = true;
+        }
+
         if let Err(e) = (HistoryUpdatePayload::Updated {
             entry: entry.clone(),
         })
         .emit(&self.app_handle)
         {
             error!("Failed to emit history-updated event: {}", e);
+        }
+
+        if usage_changed {
+            self.emit_usage_stats_updated();
         }
 
         Ok(entry)
@@ -504,6 +712,42 @@ impl HistoryManager {
         Ok(PaginatedHistory { entries, has_more })
     }
 
+    /// Load durable per-day usage stats for the dashboard. This data is stored
+    /// separately from transcription history so cleanup/deletion does not reset
+    /// lifetime stats.
+    pub fn get_usage_stats(&self) -> Result<UsageStats> {
+        let conn = self.get_connection()?;
+        Self::get_usage_stats_with_conn(&conn)
+    }
+
+    fn get_usage_stats_with_conn(conn: &Connection) -> Result<UsageStats> {
+        let mut stmt = conn.prepare(
+            "SELECT day, count, words
+             FROM usage_stats_daily
+             WHERE count > 0 OR words > 0
+             ORDER BY day ASC",
+        )?;
+
+        let days: Vec<UsageDay> = stmt
+            .query_map([], |row| {
+                Ok(UsageDay {
+                    day: row.get("day")?,
+                    count: row.get("count")?,
+                    words: row.get("words")?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let total_transcriptions = days.iter().map(|d| d.count).sum();
+        let total_words = days.iter().map(|d| d.words).sum();
+
+        Ok(UsageStats {
+            days,
+            total_transcriptions,
+            total_words,
+        })
+    }
+
     #[cfg(test)]
     fn get_latest_entry_with_conn(conn: &Connection) -> Result<Option<HistoryEntry>> {
         let mut stmt = conn.prepare(
@@ -666,7 +910,14 @@ mod tests {
                 transcription_text TEXT NOT NULL,
                 post_processed_text TEXT,
                 post_process_prompt TEXT,
-                post_process_requested BOOLEAN NOT NULL DEFAULT 0
+                post_process_requested BOOLEAN NOT NULL DEFAULT 0,
+                usage_recorded BOOLEAN NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE usage_stats_daily (
+                day INTEGER PRIMARY KEY,
+                count INTEGER NOT NULL DEFAULT 0,
+                words INTEGER NOT NULL DEFAULT 0
             );",
         )
         .expect("create transcription_history table");
@@ -733,5 +984,24 @@ mod tests {
 
         assert_eq!(entry.timestamp, 100);
         assert_eq!(entry.transcription_text, "completed");
+    }
+
+    #[test]
+    fn get_usage_stats_reads_durable_stats_without_history_entries() {
+        let conn = setup_conn();
+        conn.execute(
+            "INSERT INTO usage_stats_daily (day, count, words)
+             VALUES (?1, ?2, ?3), (?4, ?5, ?6)",
+            params![100, 2, 5, 200, 1, 7],
+        )
+        .expect("insert usage stats");
+
+        let stats = HistoryManager::get_usage_stats_with_conn(&conn).expect("get usage stats");
+
+        assert_eq!(stats.days.len(), 2);
+        assert_eq!(stats.total_transcriptions, 3);
+        assert_eq!(stats.total_words, 12);
+        assert_eq!(stats.days[0].day, 100);
+        assert_eq!(stats.days[1].day, 200);
     }
 }

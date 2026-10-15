@@ -83,7 +83,7 @@ impl VadConfig {
 /// Callback invoked with each 16 kHz mono frame that passes the active capture
 /// policy while recording. Used to feed a live streaming transcription as audio arrives.
 pub type AudioFrameCallback = Arc<dyn Fn(&[f32]) + Send + Sync + 'static>;
-pub type LevelCallback = Arc<dyn Fn(Vec<f32>) + Send + Sync + 'static>;
+pub type LevelCallback = Arc<dyn Fn(Vec<f32>, Vec<f32>) + Send + Sync + 'static>;
 
 pub struct AudioRecorder {
     device: Option<Device>,
@@ -142,7 +142,7 @@ impl AudioRecorder {
 
     pub fn with_level_callback<F>(mut self, cb: F) -> Self
     where
-        F: Fn(Vec<f32>) + Send + Sync + 'static,
+        F: Fn(Vec<f32>, Vec<f32>) + Send + Sync + 'static,
     {
         self.level_cb = Some(Arc::new(cb));
         self
@@ -696,6 +696,84 @@ enum ChunkDisposition {
     Discard,
 }
 
+/// Handy Beta's original four-bar meter. Loudness comes from raw microphone RMS;
+/// the four FFT bands only shape the bars relative to one another.
+struct CompactMeter {
+    visualizer: AudioVisualiser,
+    band_shape: [f32; 4],
+    display_levels: [f32; 4],
+    accum_sq: f32,
+    accum_n: usize,
+    last_emit: Instant,
+}
+
+impl CompactMeter {
+    const EMIT_INTERVAL: Duration = Duration::from_millis(50);
+    const NOISE_GATE: f32 = 0.004;
+    const FULL_SCALE: f32 = 0.075;
+    const GAMMA: f32 = 0.6;
+    const BAND_GAIN: [f32; 4] = [1.0, 1.5, 2.4, 3.5];
+    const SHAPE_FLOOR: f32 = 0.45;
+
+    fn new(sample_rate: u32, window_size: usize) -> Self {
+        Self {
+            visualizer: AudioVisualiser::new(sample_rate, window_size, 4, 120.0, 5200.0),
+            band_shape: [1.0; 4],
+            display_levels: [0.0; 4],
+            accum_sq: 0.0,
+            accum_n: 0,
+            last_emit: Instant::now(),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.visualizer.reset();
+        self.band_shape = [1.0; 4];
+        self.display_levels = [0.0; 4];
+        self.accum_sq = 0.0;
+        self.accum_n = 0;
+        self.last_emit = Instant::now();
+    }
+
+    fn feed(&mut self, raw: &[f32]) -> Option<[f32; 4]> {
+        if raw.is_empty() {
+            return None;
+        }
+
+        self.accum_sq += raw.iter().map(|sample| sample * sample).sum::<f32>();
+        self.accum_n += raw.len();
+
+        if let Some(bands) = self.visualizer.feed_raw(raw) {
+            let gained = std::array::from_fn::<_, 4, _>(|i| bands[i] * Self::BAND_GAIN[i]);
+            let max = gained.iter().copied().fold(0.0, f32::max).max(1e-9);
+            for (i, shape) in self.band_shape.iter_mut().enumerate() {
+                let instant = gained[i] / max;
+                *shape = *shape * 0.5 + instant * 0.5;
+            }
+        }
+
+        if self.last_emit.elapsed() < Self::EMIT_INTERVAL {
+            return None;
+        }
+
+        let rms = (self.accum_sq / self.accum_n as f32).sqrt();
+        let loudness = (((rms - Self::NOISE_GATE).max(0.0))
+            / (Self::FULL_SCALE - Self::NOISE_GATE))
+            .clamp(0.0, 1.0)
+            .powf(Self::GAMMA);
+        for (i, level) in self.display_levels.iter_mut().enumerate() {
+            let weight = Self::SHAPE_FLOOR + (1.0 - Self::SHAPE_FLOOR) * self.band_shape[i];
+            let target = loudness * weight;
+            *level = *level * 0.35 + target * 0.65;
+        }
+
+        self.accum_sq = 0.0;
+        self.accum_n = 0;
+        self.last_emit = Instant::now();
+        Some(self.display_levels)
+    }
+}
+
 /// Converts raw ring samples into 16 kHz frames across recording sessions.
 /// Ring transport stays outside to avoid conflicting borrows during drains.
 struct CaptureProcessor {
@@ -706,6 +784,8 @@ struct CaptureProcessor {
     audio_cb: Option<AudioFrameCallback>,
     stream_running_at: Instant,
     visualizer: AudioVisualiser,
+    compact_meter: CompactMeter,
+    latest_spectrum: Vec<f32>,
     frame_resampler: FrameResampler,
     max_drain_samples: usize,
     first_chunk_logged: bool,
@@ -748,6 +828,7 @@ impl CaptureProcessor {
             .min_by_key(|w| w.abs_diff(target_window))
             .unwrap();
         let visualizer = AudioVisualiser::new(in_sample_rate, window_size, BUCKETS, 400.0, 4000.0);
+        let compact_meter = CompactMeter::new(in_sample_rate, window_size);
 
         let max_drain_samples =
             ((in_sample_rate as u128 * MAX_DRAIN_CHUNK.as_millis()) / 1_000).max(1) as usize;
@@ -759,6 +840,8 @@ impl CaptureProcessor {
             audio_cb,
             stream_running_at,
             visualizer,
+            compact_meter,
+            latest_spectrum: vec![0.0; BUCKETS],
             frame_resampler,
             max_drain_samples,
             first_chunk_logged: false,
@@ -780,6 +863,8 @@ impl CaptureProcessor {
         self.vad_policy = policy;
         self.processed_samples.clear();
         self.visualizer.reset();
+        self.compact_meter.reset();
+        self.latest_spectrum.fill(0.0);
         self.frame_resampler.reset();
         if policy != VadPolicy::Disabled {
             if let Some(cfg) = &self.vad {
@@ -822,8 +907,11 @@ impl CaptureProcessor {
         }
 
         if let Some(buckets) = self.visualizer.feed(raw) {
+            self.latest_spectrum = buckets;
+        }
+        if let Some(compact_levels) = self.compact_meter.feed(raw) {
             if let Some(callback) = &self.level_cb {
-                callback(buckets);
+                callback(self.latest_spectrum.clone(), compact_levels.to_vec());
             }
         }
 

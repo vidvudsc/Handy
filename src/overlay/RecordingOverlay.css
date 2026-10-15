@@ -115,6 +115,42 @@
   align-items: flex-start; /* top placement: flush to the top edge */
 }
 
+/* Handy Beta's compact recording and processing indicator. Live streaming
+   retains the upstream expanded transcript panel. */
+.beta-compact {
+  width: 72px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border-radius: 16px;
+  background: #000c;
+}
+.beta-bar {
+  width: 5px;
+  height: 20px;
+  transform: scaleY(0.2);
+  opacity: 0.5;
+  border-radius: 3px;
+  transform-origin: center;
+  will-change: transform, opacity;
+}
+.beta-bar.loading {
+  animation: beta-bar-loading 1s ease-in-out infinite;
+}
+@keyframes beta-bar-loading {
+  0%,
+  100% {
+    transform: scaleY(0.25);
+    opacity: 0.45;
+  }
+  50% {
+    transform: scaleY(0.9);
+    opacity: 1;
+  }
+}
+
 /* Compact pill: fade the whole container in/out (the pill itself never pops or
    morphs). */
 .ov-fade {
@@ -123,6 +159,15 @@
 }
 .ov-fade.show {
   opacity: 1;
+  animation: beta-overlay-enter 200ms ease-out;
+}
+@keyframes beta-overlay-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 /* Top placement, Live panel: stack the control pill above the text region so the

@@ -45,3 +45,8 @@ result
 
 # Python bytecode (scripts/)
 __pycache__/
+
+# Prepared native Phonon assets (versioned sources and checksums live in scripts/)
+src-tauri/resources/phonon-coreml/
+src-tauri/swift/phonon-sidecar/.build/
+src-tauri/swift/phonon-sidecar/.swiftpm/

@@ -30,6 +30,7 @@ pub enum EngineType {
     /// the file, so this one variant covers the whole transcribe-cpp family.
     TranscribeCpp,
     Parakeet,
+    Phonon,
     Moonshine,
     MoonshineStreaming,
     SenseVoice,
@@ -540,6 +541,38 @@ impl ModelManager {
         }
 
         let mut available_models = HashMap::new();
+
+        // This Beta build ships the verified model and native helper together.
+        // Other platforms, older macOS, or builds without the assets omit it.
+        if crate::phonon::bundled_model_path(app_handle).is_ok() {
+            available_models.insert(
+                crate::phonon::MODEL_ID.to_string(),
+                ModelInfo {
+                    id: crate::phonon::MODEL_ID.to_string(),
+                    name: "Phonon-2 Core ML".to_string(),
+                    description:
+                        "English dictation on the Apple Neural Engine. Included with Handy Beta."
+                            .to_string(),
+                    filename: "phonon-2-coreml".to_string(),
+                    source: ModelSource::Local,
+                    size_mb: 330,
+                    is_downloaded: true,
+                    is_downloading: false,
+                    partial_size: 0,
+                    is_directory: true,
+                    engine_type: EngineType::Phonon,
+                    accuracy_score: 0.79,
+                    speed_score: 1.0,
+                    supports_translation: false,
+                    is_recommended: true,
+                    supported_languages: vec!["en".to_string()],
+                    supports_language_selection: false,
+                    is_custom: false,
+                    supports_streaming: false,
+                    supports_language_detection: false,
+                },
+            );
+        }
 
         // Whisper supported languages (99 languages from tokenizer)
         let whisper_languages: Vec<String> = vec![
@@ -1377,6 +1410,7 @@ impl ModelManager {
     }
 
     fn update_download_status(&self) -> Result<()> {
+        let phonon_available = crate::phonon::bundled_model_path(&self.app_handle).is_ok();
         // Snapshot in-flight download ids before taking the registry lock (the
         // two locks are never nested) so a mid-download entry is never dropped.
         let downloading_ids: HashSet<String> =
@@ -1385,6 +1419,11 @@ impl ModelManager {
         let mut vanished_models: Vec<String> = Vec::new();
 
         for model in models.values_mut() {
+            if matches!(model.engine_type, EngineType::Phonon) {
+                model.is_downloaded = phonon_available;
+                model.is_downloading = false;
+                continue;
+            }
             if let ModelSource::HuggingFace { repo_id, revision } = &model.source {
                 // A models-dir copy counts too: mirror-fallback downloads land
                 // there, and it makes manual drop-ins of catalog files work.
@@ -2394,6 +2433,9 @@ impl ModelManager {
     }
 
     pub fn delete_model(&self, model_id: &str) -> Result<()> {
+        if model_id == crate::phonon::MODEL_ID {
+            anyhow::bail!("Phonon is included with Handy Beta and cannot be deleted separately");
+        }
         debug!("ModelManager: delete_model called for: {}", model_id);
 
         let model_info = {
@@ -2560,6 +2602,9 @@ impl ModelManager {
     }
 
     pub fn get_model_path(&self, model_id: &str) -> Result<PathBuf> {
+        if model_id == crate::phonon::MODEL_ID {
+            return crate::phonon::bundled_model_path(&self.app_handle);
+        }
         let model_info = self
             .get_model_info(model_id)
             .ok_or_else(|| anyhow::anyhow!("Model not found: {}", model_id))?;
