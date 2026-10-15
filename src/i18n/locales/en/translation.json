@@ -34,7 +34,7 @@
     "models": {
       "phonon-2-coreml": {
         "name": "Phonon-2 Core ML",
-        "description": "English dictation on the Apple Neural Engine. Included with Handy Beta. The first setup prepares the model for your Mac."
+        "description": "English dictation on the Apple Neural Engine. Experimental: switches to Parakeet if model preparation stalls."
       },
       "small": {
         "name": "Whisper Small",

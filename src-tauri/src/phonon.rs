@@ -4,15 +4,49 @@ use serde_json::Value;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{self, Sender};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::time::{Duration, Instant};
 use tauri::{path::BaseDirectory, AppHandle, Manager};
 
 pub const MODEL_ID: &str = "phonon-2-coreml";
-// Compiling all four windows once can exceed ten minutes on a busy M1.
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(20 * 60);
-const RESTART_TIMEOUT: Duration = Duration::from_secs(30);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+// ANE preparation can recur after idle, even with a compiled-model cache.
+// Interactive dictation must fail over instead of waiting minutes.
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
+const RESTART_TIMEOUT: Duration = Duration::from_secs(15);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+static CANCEL_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+pub fn cancel_pending() {
+    CANCEL_EPOCH.fetch_add(1, Ordering::AcqRel);
+}
+
+pub fn cancel_epoch() -> u64 {
+    CANCEL_EPOCH.load(Ordering::Acquire)
+}
+
+pub fn ensure_not_cancelled(epoch: u64) -> Result<()> {
+    if cancel_epoch() != epoch {
+        bail!("Phonon operation cancelled");
+    }
+    Ok(())
+}
+
+fn wait_reply(receiver: &Receiver<Reply>, timeout: Duration, epoch: u64) -> Result<Value> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        ensure_not_cancelled(epoch)?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            bail!("Phonon helper timed out");
+        }
+        match receiver.recv_timeout(remaining.min(Duration::from_millis(25))) {
+            Ok(reply) => return reply.map_err(|e| anyhow!(e)),
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => bail!("Phonon helper exited"),
+        }
+    }
+}
 const MAX_AUDIO_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 
@@ -87,7 +121,12 @@ fn read_response(reader: &mut impl BufRead) -> Result<Value> {
 }
 
 impl Process {
-    fn spawn(binary: &Path, args: &[&std::ffi::OsStr], startup_timeout: Duration) -> Result<Self> {
+    fn spawn(
+        binary: &Path,
+        args: &[&std::ffi::OsStr],
+        startup_timeout: Duration,
+        epoch: u64,
+    ) -> Result<Self> {
         let mut child = Command::new(binary)
             .args(args)
             .stdin(Stdio::piped())
@@ -125,10 +164,8 @@ impl Process {
                 }
             }
         });
-        let ready = ready_rx
-            .recv_timeout(startup_timeout)
-            .context("Phonon startup timed out or the helper exited")?
-            .map_err(|e| anyhow!(e))?;
+        let ready = wait_reply(&ready_rx, startup_timeout, epoch)
+            .context("Phonon startup did not complete")?;
         if ready.get("ready") != Some(&Value::Bool(true)) {
             bail!("Phonon helper did not become ready");
         }
@@ -136,6 +173,7 @@ impl Process {
     }
 
     fn transcribe(&self, samples: &[f32], timeout: Duration) -> Result<String> {
+        let epoch = cancel_epoch();
         if samples.len() > MAX_AUDIO_BYTES / 4 {
             bail!("Recording exceeds Phonon's 64 MB PCM request limit");
         }
@@ -147,10 +185,8 @@ impl Process {
         self.requests
             .send(Request { audio, reply })
             .context("Phonon helper is unavailable")?;
-        let value = response
-            .recv_timeout(timeout)
-            .context("Phonon transcription timed out or the helper exited")?
-            .map_err(|e| anyhow!(e))?;
+        let value = wait_reply(&response, timeout, epoch)
+            .context("Phonon transcription did not complete")?;
         let text = value
             .get("text")
             .and_then(Value::as_str)
@@ -170,12 +206,13 @@ pub struct PhononEngine {
 }
 
 impl PhononEngine {
-    pub fn load(app: &AppHandle, model: &Path) -> Result<Self> {
+    pub fn load(app: &AppHandle, model: &Path, epoch: u64) -> Result<Self> {
         let binary = app.path().resolve(
             "resources/phonon-coreml/handy-phonon",
             BaseDirectory::Resource,
         )?;
-        let process = Process::spawn(&binary, &[model.as_os_str()], STARTUP_TIMEOUT)?;
+        ensure_not_cancelled(epoch)?;
+        let process = Process::spawn(&binary, &[model.as_os_str()], STARTUP_TIMEOUT, epoch)?;
         Ok(Self {
             binary,
             model: model.to_path_buf(),
@@ -192,6 +229,7 @@ impl PhononEngine {
                 &self.binary,
                 &[self.model.as_os_str()],
                 RESTART_TIMEOUT,
+                cancel_epoch(),
             )?);
         }
         let result = self
@@ -210,6 +248,8 @@ impl PhononEngine {
 mod tests {
     use super::*;
     use std::io::Cursor;
+    // Serialize tests that exercise the process-wide cancellation generation.
+    static CANCEL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn protocol_rejects_eof_errors_and_unterminated_responses() {
@@ -220,21 +260,77 @@ mod tests {
         assert_eq!(value["text"], "Hello");
     }
 
+    #[test]
+    fn cancelled_wait_returns_without_waiting_for_the_helper() {
+        let _serial = CANCEL_TEST_LOCK.lock().unwrap();
+        let (_sender, receiver) = mpsc::channel::<Reply>();
+        let started = Instant::now();
+        assert!(wait_reply(
+            &receiver,
+            Duration::from_secs(30),
+            cancel_epoch().wrapping_sub(1)
+        )
+        .is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn cancel_interrupts_a_wait_that_is_already_running() {
+        let _serial = CANCEL_TEST_LOCK.lock().unwrap();
+        let (_sender, receiver) = mpsc::channel::<Reply>();
+        let epoch = cancel_epoch();
+        let cancel = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(50));
+            cancel_pending();
+        });
+        let started = Instant::now();
+        let error = wait_reply(&receiver, Duration::from_secs(30), epoch).unwrap_err();
+        cancel.join().unwrap();
+        assert!(error.to_string().contains("cancelled"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_timeout_reaps_a_helper_that_never_becomes_ready() {
+        let _serial = CANCEL_TEST_LOCK.lock().unwrap();
+        let started = Instant::now();
+        let error = Process::spawn(
+            Path::new("/bin/sh"),
+            &[
+                std::ffi::OsStr::new("-c"),
+                std::ffi::OsStr::new("exec sleep 30"),
+            ],
+            Duration::from_millis(50),
+            cancel_epoch(),
+        )
+        .err()
+        .expect("hung startup must time out");
+        assert!(format!("{error:#}").contains("timed out"));
+        assert!(started.elapsed() >= Duration::from_millis(50));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
     #[cfg(unix)]
     #[test]
     fn hung_helper_has_a_bounded_request_and_is_reaped() {
+        let _serial = CANCEL_TEST_LOCK.lock().unwrap();
         let mut process = Process::spawn(
             Path::new("/bin/sh"),
             &[
                 std::ffi::OsStr::new("-c"),
-                std::ffi::OsStr::new("printf '{\"ready\":true}\\n'; exec cat >/dev/null"),
+                std::ffi::OsStr::new("printf '{\"ready\":true}\\n'; exec sleep 30"),
             ],
             Duration::from_secs(2),
+            cancel_epoch(),
         )
         .unwrap();
-        assert!(process
+        let started = Instant::now();
+        let error = process
             .transcribe(&[0.1; 64], Duration::from_millis(50))
-            .is_err());
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("timed out"));
+        assert!(started.elapsed() >= Duration::from_millis(50));
         process.child.kill().unwrap();
         assert!(process.child.wait().is_ok());
     }

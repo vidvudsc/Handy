@@ -551,7 +551,7 @@ impl ModelManager {
                     id: crate::phonon::MODEL_ID.to_string(),
                     name: "Phonon-2 Core ML".to_string(),
                     description:
-                        "English dictation on the Apple Neural Engine. Included with Handy Beta."
+                        "English dictation on the Apple Neural Engine. Experimental: switches to Parakeet if model preparation stalls."
                             .to_string(),
                     filename: "phonon-2-coreml".to_string(),
                     source: ModelSource::Local,
@@ -564,7 +564,7 @@ impl ModelManager {
                     accuracy_score: 0.79,
                     speed_score: 1.0,
                     supports_translation: false,
-                    is_recommended: true,
+                    is_recommended: false,
                     supported_languages: vec!["en".to_string()],
                     supports_language_selection: false,
                     is_custom: false,

@@ -317,6 +317,13 @@ impl TranscriptionManager {
 
                     let settings = get_settings(&app_handle_cloned);
                     let timeout = settings.model_unload_timeout;
+                    // Phonon's ANE preparation can recur after unloading.
+                    // Keep a prepared instance resident until a model switch.
+                    if manager_cloned.get_current_model().as_deref()
+                        == Some(crate::phonon::MODEL_ID)
+                    {
+                        continue;
+                    }
 
                     // Skip Immediately — that variant is handled by
                     // maybe_unload_immediately() after each transcription.
@@ -483,6 +490,7 @@ impl TranscriptionManager {
         model_id: &str,
         device_index: Option<usize>,
     ) -> Result<()> {
+        let phonon_epoch = crate::phonon::cancel_epoch();
         apply_accelerator_settings(&self.app_handle);
 
         let load_start = std::time::Instant::now();
@@ -559,9 +567,27 @@ impl TranscriptionManager {
         let loaded_engine = match model_info.engine_type {
             EngineType::Phonon => {
                 crate::mlx_sidecar::shutdown();
-                let engine = crate::phonon::PhononEngine::load(&self.app_handle, &model_path)
-                    .inspect_err(|error| emit_loading_failed(&error.to_string()))?;
-                LoadedEngine::Phonon(engine)
+                match crate::phonon::PhononEngine::load(&self.app_handle, &model_path, phonon_epoch)
+                {
+                    Ok(engine) => LoadedEngine::Phonon(engine),
+                    Err(error) => {
+                        emit_loading_failed(&error.to_string());
+                        crate::phonon::ensure_not_cancelled(phonon_epoch)?;
+                        let fallback = "parakeet-tdt-0.6b-v3";
+                        self.model_manager
+                            .get_model_path(fallback)
+                            .context("Phonon could not start and Parakeet is unavailable")?;
+                        warn!(
+                            "Phonon startup failed; switching to downloaded Parakeet V3: {error:#}"
+                        );
+                        let mut settings = get_settings(&self.app_handle);
+                        if settings.selected_model == crate::phonon::MODEL_ID {
+                            settings.selected_model = fallback.to_string();
+                            crate::settings::write_settings(&self.app_handle, settings);
+                        }
+                        return self.load_model(fallback);
+                    }
+                }
             }
             EngineType::TranscribeCpp => {
                 // The whisper backend is chosen at load time (transcribe-cpp has
@@ -1200,6 +1226,7 @@ impl TranscriptionManager {
         // Update last activity timestamp
         self.touch_activity();
 
+        let phonon_epoch = crate::phonon::cancel_epoch();
         let st = std::time::Instant::now();
         let audio_len = audio.len();
 
@@ -1253,6 +1280,9 @@ impl TranscriptionManager {
             while *is_loading {
                 is_loading = self.loading_condvar.wait(is_loading).unwrap();
             }
+        }
+        if settings.selected_model == crate::phonon::MODEL_ID {
+            crate::phonon::ensure_not_cancelled(phonon_epoch)?;
         }
         // The MLX path avoids preloading the CPU model. If the sidecar is not
         // ready or fails, load the fallback engine here before transcription.
@@ -1353,6 +1383,7 @@ impl TranscriptionManager {
                     LoadedEngine::Phonon(phonon_engine) => {
                         applied_language_hint = Some("en".to_string());
                         phonon_engine.transcribe(&audio).or_else(|error| {
+                            crate::phonon::ensure_not_cancelled(phonon_epoch)?;
                             warn!("Phonon request failed; trying the downloaded Parakeet V3 fallback: {error:#}");
                             let path = self.model_manager.get_model_path("parakeet-tdt-0.6b-v3")
                                 .with_context(|| format!("Phonon failed ({error}); Parakeet fallback is unavailable"))?;

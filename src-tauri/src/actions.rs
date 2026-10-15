@@ -37,6 +37,7 @@ struct RecordingErrorEvent {
 struct FinishGuard(AppHandle, Arc<TranscriptionManager>);
 impl Drop for FinishGuard {
     fn drop(&mut self) {
+        shortcut::unregister_cancel_shortcut(&self.0);
         self.1.maybe_unload_immediately("transcription session");
         if let Some(c) = self.0.try_state::<TranscriptionCoordinator>() {
             c.notify_processing_finished();
@@ -640,8 +641,8 @@ impl ShortcutAction for TranscribeAction {
         app.state::<Arc<AudioRecordingManager>>()
             .invalidate_recording_readiness();
 
-        // Unregister the cancel shortcut when transcription stops
-        shortcut::unregister_cancel_shortcut(app);
+        // Keep cancel registered through model loading and transcription.
+        // FinishGuard unregisters it once the processing pipeline drains.
 
         let stop_time = Instant::now();
         debug!("TranscribeAction::stop called for binding: {}", binding_id);
