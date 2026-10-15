@@ -248,6 +248,7 @@ impl Drop for StreamWorkerGuard {
 #[derive(Clone)]
 pub struct TranscriptionManager {
     engine: Arc<Mutex<Option<LoadedEngine>>>,
+    phonon_backup: Arc<Mutex<Option<ParakeetModel>>>,
     model_manager: Arc<ModelManager>,
     app_handle: AppHandle,
     current_model_id: Arc<Mutex<Option<String>>>,
@@ -284,6 +285,7 @@ impl TranscriptionManager {
     pub fn new(app_handle: &AppHandle, model_manager: Arc<ModelManager>) -> Result<Self> {
         let manager = Self {
             engine: Arc::new(Mutex::new(None)),
+            phonon_backup: Arc::new(Mutex::new(None)),
             model_manager,
             app_handle: app_handle.clone(),
             current_model_id: Arc::new(Mutex::new(None)),
@@ -491,6 +493,9 @@ impl TranscriptionManager {
         device_index: Option<usize>,
     ) -> Result<()> {
         let phonon_epoch = crate::phonon::cancel_epoch();
+        if model_id != crate::phonon::MODEL_ID {
+            *self.phonon_backup.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
         apply_accelerator_settings(&self.app_handle);
 
         let load_start = std::time::Instant::now();
@@ -569,7 +574,10 @@ impl TranscriptionManager {
                 crate::mlx_sidecar::shutdown();
                 match crate::phonon::PhononEngine::load(&self.app_handle, &model_path, phonon_epoch)
                 {
-                    Ok(engine) => LoadedEngine::Phonon(engine),
+                    Ok(engine) => {
+                        *self.phonon_backup.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                        LoadedEngine::Phonon(engine)
+                    }
                     Err(error) => {
                         emit_loading_failed(&error.to_string());
                         crate::phonon::ensure_not_cancelled(phonon_epoch)?;
@@ -828,8 +836,22 @@ impl TranscriptionManager {
             }
             Some(LoadedEngine::Phonon(_)) => Some("coreml-neural-engine".to_string()),
             Some(_) => Some("onnx".to_string()),
-            None => None,
+            None => self
+                .phonon_backup
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .map(|_| "onnx-parakeet-backup".to_string()),
         }
+    }
+
+    /// Cancel preparation and allow its helper to be reaped before headless exit.
+    pub fn finish_background_preparation(&self) {
+        crate::phonon::cancel_pending();
+        let loading = self.is_loading.lock().unwrap();
+        let _ =
+            self.loading_condvar
+                .wait_timeout_while(loading, Duration::from_secs(2), |loading| *loading);
     }
 
     /// Whether a live streaming run is currently in flight.
@@ -1273,7 +1295,52 @@ impl TranscriptionManager {
             }
         }
 
-        // Wait for any in-progress model load before using the fallback engine.
+        // Phonon preparation is independent of the dictation pipeline. Never
+        // wait for ANE compilation before returning a user's recording.
+        if settings.selected_model == crate::phonon::MODEL_ID
+            && (*self.is_loading.lock().unwrap() || !self.is_model_loaded())
+        {
+            self.initiate_model_load();
+            crate::phonon::ensure_not_cancelled(phonon_epoch)?;
+            let mut backup = self.phonon_backup.lock().unwrap_or_else(|e| e.into_inner());
+            if backup.is_none() {
+                let path = self.model_manager.get_model_path("parakeet-tdt-0.6b-v3")?;
+                *backup = Some(
+                    ParakeetModel::load(&path, &Quantization::Int8)
+                        .map_err(|e| anyhow::anyhow!("Parakeet backup load failed: {e}"))?,
+                );
+            }
+            let raw = backup
+                .as_mut()
+                .context("Parakeet backup unavailable")?
+                .transcribe_with(
+                    &audio,
+                    &ParakeetParams {
+                        timestamp_granularity: Some(TimestampGranularity::Segment),
+                        ..Default::default()
+                    },
+                )
+                .map_err(|e| anyhow::anyhow!("Parakeet backup transcription failed: {e}"))?
+                .text;
+            if settings.model_unload_timeout == ModelUnloadTimeout::Immediately {
+                *backup = None;
+            }
+            drop(backup);
+            crate::phonon::ensure_not_cancelled(phonon_epoch)?;
+            info!(
+                "Parakeet backup completed in {}ms while Phonon prepares",
+                st.elapsed().as_millis()
+            );
+            return Ok(post_process_transcription_text(
+                raw,
+                &settings,
+                false,
+                &OutputLanguageEvidence::ModelConstrained("en".to_string()),
+                &["en".to_string()],
+            ));
+        }
+
+        // Wait for other model loads before using their engines.
         {
             // If the model is loading, wait for it to complete.
             let mut is_loading = self.is_loading.lock().unwrap();

@@ -11,8 +11,9 @@ use tauri::{path::BaseDirectory, AppHandle, Manager};
 
 pub const MODEL_ID: &str = "phonon-2-coreml";
 // ANE preparation can recur after idle, even with a compiled-model cache.
-// Interactive dictation must fail over instead of waiting minutes.
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
+// Preparation runs independently of interactive dictation, which uses a
+// temporary backup while the native engine becomes ready.
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const RESTART_TIMEOUT: Duration = Duration::from_secs(15);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 static CANCEL_EPOCH: AtomicU64 = AtomicU64::new(0);

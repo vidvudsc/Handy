@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import PhononCoreML
 
@@ -25,6 +26,14 @@ guard CommandLine.arguments.count == 2 else {
 }
 
 do {
+    // Core ML preparation can outlive an abrupt host exit. Stop promptly when
+    // the owning app exits, including before the request loop becomes ready.
+    let parent = getppid()
+    let parentWatch = DispatchSource.makeTimerSource(queue: .global())
+    parentWatch.schedule(deadline: .now() + .milliseconds(500), repeating: .milliseconds(500))
+    parentWatch.setEventHandler { if getppid() != parent { exit(0) } }
+    parentWatch.resume()
+    defer { parentWatch.cancel() }
     var options = Transcriber.Options()
     options.progress = { phase, seconds in
         FileHandle.standardError.write(Data(String(format: "[phonon] %.2fs %@\n", seconds, phase).utf8))

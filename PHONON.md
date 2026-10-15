@@ -11,9 +11,11 @@ loads every encoder window before reporting readiness. On this M1 Pro, Apple
 Neural Engine preparation has recurred after idle unloading and taken minutes;
 a compiled-model cache does not guarantee a quick reload.
 
-Interactive startup is limited to 15 seconds. If it cannot finish, Handy
-temporarily uses the downloaded Parakeet V3 model for transcription. Phonon
-remains the selected primary, and the next recording session retries it.
+Phonon prepares in the background while dictation uses a cached Parakeet V3
+backup. Recordings never wait for Neural Engine preparation. Once ready,
+Phonon takes over and the backup instance is released. Phonon remains the
+selected primary throughout. Preparation has a 20-minute safety limit and
+can be cancelled; transcription requests retain their separate short timeout.
 A prepared Phonon instance stays resident through normal idle periods until
 a model switch or application exit. The explicit Immediately unload setting
 still applies. There is no Python dependency for the Phonon runtime and no
@@ -57,7 +59,9 @@ silence, invalid input recovery, and clean shutdown. Supply `--helper`,
 
 The app's `--transcribe-file WAV --model phonon-2-coreml --json` command tests
 the complete Rust transcription path. Its reported backend must be
-`coreml-neural-engine`. These tests do not measure microphone, hotkey, or paste
+`coreml-neural-engine`. Without an explicit `--model`, the selected Phonon
+model uses the same background preparation path as interactive dictation;
+`onnx-parakeet-backup` identifies the temporary backup honestly. These tests do not measure microphone, hotkey, or paste
 latency and do not establish accuracy on arbitrary dictations.
 
 ## Attribution

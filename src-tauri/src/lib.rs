@@ -559,14 +559,17 @@ fn run_headless_transcription(app: &AppHandle, args: &CliArgs) -> i32 {
         None => "settings".to_string(),
     };
 
-    // Cold load (timed).
+    // Default-selected Phonon follows the interactive background warmup path.
+    // Explicit --model continues to wait for that engine for strict benchmarks.
+    let background_primary = args.model.is_none() && model_id == phonon::MODEL_ID;
     let load_start = Instant::now();
-    if let Err(e) = tm.load_model_with_device(&model_id, device_index) {
+    if background_primary {
+        tm.initiate_model_load();
+    } else if let Err(e) = tm.load_model_with_device(&model_id, device_index) {
         eprintln!("error: load_model('{}') failed: {}", model_id, e);
         return 1;
     }
     let load_ms = load_start.elapsed().as_millis() as u64;
-    let bound_backend = tm.current_backend();
 
     let runs = args.repeat.unwrap_or(1).max(1);
     let mut times_ms: Vec<u64> = Vec::new();
@@ -575,7 +578,7 @@ fn run_headless_transcription(app: &AppHandle, args: &CliArgs) -> i32 {
         // If the model's unload-timeout is "Immediately", transcribe() unloads
         // the engine after each run; reload (untimed) so repeats keep working
         // and the inference timing below stays clean.
-        if !tm.is_model_loaded() {
+        if !background_primary && !tm.is_model_loaded() {
             if let Err(e) = tm.load_model_with_device(&model_id, device_index) {
                 eprintln!("error: reload before run {} failed: {}", i + 1, e);
                 return 1;
@@ -590,6 +593,10 @@ fn run_headless_transcription(app: &AppHandle, args: &CliArgs) -> i32 {
             }
         }
         times_ms.push(t.elapsed().as_millis() as u64);
+    }
+    let bound_backend = tm.current_backend();
+    if background_primary {
+        tm.finish_background_preparation();
     }
     let best_ms = times_ms.iter().copied().min().unwrap_or(0);
     let rtf = if best_ms > 0 {
