@@ -12,7 +12,8 @@ Neural Engine preparation has recurred after idle unloading and taken minutes;
 a compiled-model cache does not guarantee a quick reload.
 
 Interactive startup is limited to 15 seconds. If it cannot finish, Handy
-selects the downloaded Parakeet V3 model and transcribes with that model.
+temporarily uses the downloaded Parakeet V3 model for transcription. Phonon
+remains the selected primary, and the next recording session retries it.
 A prepared Phonon instance stays resident through normal idle periods until
 a model switch or application exit. The explicit Immediately unload setting
 still applies. There is no Python dependency for the Phonon runtime and no

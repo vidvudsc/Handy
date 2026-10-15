@@ -34,7 +34,7 @@
     "models": {
       "phonon-2-coreml": {
         "name": "Phonon-2 Core ML",
-        "description": "English dictation on the Apple Neural Engine. Experimental: switches to Parakeet if model preparation stalls."
+        "description": "English dictation on the Apple Neural Engine. Experimental: temporarily uses Parakeet if model preparation stalls."
       },
       "small": {
         "name": "Whisper Small",

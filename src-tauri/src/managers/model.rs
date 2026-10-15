@@ -551,7 +551,7 @@ impl ModelManager {
                     id: crate::phonon::MODEL_ID.to_string(),
                     name: "Phonon-2 Core ML".to_string(),
                     description:
-                        "English dictation on the Apple Neural Engine. Experimental: switches to Parakeet if model preparation stalls."
+                        "English dictation on the Apple Neural Engine. Experimental: temporarily uses Parakeet if model preparation stalls."
                             .to_string(),
                     filename: "phonon-2-coreml".to_string(),
                     source: ModelSource::Local,

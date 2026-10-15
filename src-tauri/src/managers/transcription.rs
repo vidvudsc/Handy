@@ -578,13 +578,10 @@ impl TranscriptionManager {
                             .get_model_path(fallback)
                             .context("Phonon could not start and Parakeet is unavailable")?;
                         warn!(
-                            "Phonon startup failed; switching to downloaded Parakeet V3: {error:#}"
+                            "Phonon startup failed; temporarily using downloaded Parakeet V3: {error:#}"
                         );
-                        let mut settings = get_settings(&self.app_handle);
-                        if settings.selected_model == crate::phonon::MODEL_ID {
-                            settings.selected_model = fallback.to_string();
-                            crate::settings::write_settings(&self.app_handle, settings);
-                        }
+                        // Keep the user's primary selection. This fallback is
+                        // temporary; the next session can retry Phonon.
                         return self.load_model(fallback);
                     }
                 }
@@ -789,7 +786,10 @@ impl TranscriptionManager {
         }
 
         let reload_pending = self.reload_model_on_next_use.load(Ordering::Acquire);
-        if !reload_pending && self.is_model_loaded() {
+        if !reload_pending
+            && self.is_model_loaded()
+            && self.get_current_model().as_deref() == Some(settings.selected_model.as_str())
+        {
             return;
         }
 
